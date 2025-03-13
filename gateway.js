@@ -15,14 +15,10 @@ const logger = {
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
-const secureAgent = new https.Agent({
-    rejectUnauthorized: false
-});
-
 class CustomDataSource extends RemoteGraphQLDataSource {
     willSendRequest({ request }) {
         request.http = request.http || {};
-        request.http.agent = secureAgent;
+        request.http.rejectUnauthorized = false;
     }
 }
 
