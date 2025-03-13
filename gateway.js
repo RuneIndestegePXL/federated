@@ -18,7 +18,7 @@ const ca = fs.readFileSync(certificatePath);
 
 const secureAgent = new https.Agent({
     ca,
-    rejectUnauthorized: true,
+    rejectUnauthorized: false,
     checkServerIdentity: () => undefined
 });
 
