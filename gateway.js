@@ -15,10 +15,14 @@ const logger = {
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
+const insecureAgent = new https.Agent({
+    rejectUnauthorized: false
+});
+
 class CustomDataSource extends RemoteGraphQLDataSource {
     willSendRequest({ request }) {
         request.http = request.http || {};
-        request.http.rejectUnauthorized = false;
+        request.http.agent = insecureAgent;
     }
 }
 
@@ -29,6 +33,9 @@ const gateway = new ApolloGateway({
             { name: 'crm-service', url: "https://crm-proxy-usecase-ace.apps.sandbox.id.internal/graphql" },
             { name: 'product-service', url: "https://prisma-usecase-ace.apps.sandbox.id.internal/graphql" }
         ],
+        introspectionHeaders: {
+            'User-Agent': 'Apollo-Gateway'
+        },
         logger: {
             debug: (message) => logger.info(`Composition: ${message}`),
             info: (message) => logger.info(`Composition: ${message}`),
@@ -36,7 +43,14 @@ const gateway = new ApolloGateway({
             error: (message) => logger.error(`Composition: ${message}`)
         }
     }),
-    buildService({ name, url }) { return new CustomDataSource({ url }); }
+    serviceHealthCheck: true,
+    buildService({ name, url }) {
+        return new CustomDataSource({
+            url,
+            httpAgent: insecureAgent,
+            httpsAgent: insecureAgent
+        });
+    }
 });
 
 async function startGateway() {
@@ -67,11 +81,7 @@ async function startGateway() {
     });
 
     const { url } = await startStandaloneServer(server, {
-        listen: { port: process.env.GATEPORT || 4000 },
-        context: async ({ req }) => {
-            logger.info(`Request headers: ${JSON.stringify(req.headers, null, 2)}`);
-            return {};
-        }
+        listen: { port: process.env.GATEPORT || 4000 }
     });
     console.log(`🚀 Federated Gateway ready at ${url}`);
 }
