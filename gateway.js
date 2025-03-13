@@ -13,13 +13,10 @@ const logger = {
     error: (message, err) => console.error(`[ERROR] ${message}`, err)
 };
 
-const certificatePath = '/etc/ssl/certs/ca-bundle.crt';
-const ca = fs.readFileSync(certificatePath);
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 const secureAgent = new https.Agent({
-    ca,
-    rejectUnauthorized: false,
-    checkServerIdentity: () => undefined
+    rejectUnauthorized: false
 });
 
 class CustomDataSource extends RemoteGraphQLDataSource {
