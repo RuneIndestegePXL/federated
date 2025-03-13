@@ -1,0 +1,21 @@
+{
+  "name": "federation-gateway",
+  "version": "1.0.0",
+  "main": "gateway.js",
+  "dependencies": {
+    "@apollo/federation": "^0.38.1",
+    "@apollo/gateway": "^2.5.1",
+    "@apollo/server": "^4.9.5",
+    "@apollo/subgraph": "^2.10.0",
+    "dotenv": "^16.4.7",
+    "graphql": "^16.8.1",
+    "graphql-tag": "^2.12.6"
+  },
+  "scripts": {
+    "start": "node gateway.js"
+  },
+  "devDependencies": {
+    "@prisma/client": "^6.4.1",
+    "prisma": "^6.4.1"
+  }
+}
