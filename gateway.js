@@ -1,4 +1,3 @@
-// javascript
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
@@ -15,11 +14,16 @@ const logger = {
 };
 
 const certificatePath = process.env.CA_CERT_PATH || '/etc/ssl/certs/ca-certificates.crt';
-if (!fs.existsSync(certificatePath)) {
-    throw new Error(`Certificate file not found at ${certificatePath}`);
+console.log('Checking certificate at:', certificatePath);
+try {
+    console.log('Directory contents:', fs.readdirSync('/etc/ssl/certs'));
+} catch (e) {
+    console.error('Could not read directory:', e);
 }
-const ca = fs.readFileSync(certificatePath);
-const secureAgent = new https.Agent({ ca, rejectUnauthorized: true });
+
+const secureAgent = new https.Agent({
+    rejectUnauthorized: false
+});
 
 class CustomDataSource extends RemoteGraphQLDataSource {
     willSendRequest({ request }) {
@@ -71,6 +75,7 @@ async function startGateway() {
         ],
         formatError: (error) => { logger.error('Formatted error:', error); return error; }
     });
+
     const { url } = await startStandaloneServer(server, {
         listen: { port: process.env.GATEPORT || 4000 },
         context: async ({ req }) => {
