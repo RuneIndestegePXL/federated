@@ -1,14 +1,33 @@
+// javascript
 const fs = require('fs');
+const path = require('path');
 const https = require('https');
 const { ApolloServer } = require('@apollo/server');
 const { startStandaloneServer } = require('@apollo/server/standalone');
 const { ApolloGateway, IntrospectAndCompose, RemoteGraphQLDataSource } = require('@apollo/gateway');
 const { ApolloServerPluginLandingPageLocalDefault } = require('@apollo/server/plugin/landingPage/default');
 require('dotenv').config();
-const logger = {info: (message) => console.log(`[INFO] ${message}`),warn: (message) => console.warn(`[WARN] ${message}`),error: (message, error) => console.error(`[ERROR] ${message}`, error)};
-const ca = fs.readFileSync('/etc/ssl/certs/ca-certificates.crt');
-const secureAgent = new https.Agent({ca, rejectUnauthorized: true});
-class CustomDataSource extends RemoteGraphQLDataSource {willSendRequest({ request }) {request.http = request.http || {}; request.http.agent = secureAgent;}}
+
+const logger = {
+    info: (message) => console.log(`[INFO] ${message}`),
+    warn: (message) => console.warn(`[WARN] ${message}`),
+    error: (message, err) => console.error(`[ERROR] ${message}`, err)
+};
+
+const certificatePath = process.env.CA_CERT_PATH || '/etc/ssl/certs/ca-certificates.crt';
+if (!fs.existsSync(certificatePath)) {
+    throw new Error(`Certificate file not found at ${certificatePath}`);
+}
+const ca = fs.readFileSync(certificatePath);
+const secureAgent = new https.Agent({ ca, rejectUnauthorized: true });
+
+class CustomDataSource extends RemoteGraphQLDataSource {
+    willSendRequest({ request }) {
+        request.http = request.http || {};
+        request.http.agent = secureAgent;
+    }
+}
+
 const gateway = new ApolloGateway({
     supergraphSdl: new IntrospectAndCompose({
         subgraphs: [
@@ -23,8 +42,9 @@ const gateway = new ApolloGateway({
             error: (message) => logger.error(`Composition: ${message}`)
         }
     }),
-    buildService({ name, url }) {return new CustomDataSource({ url });}
+    buildService({ name, url }) { return new CustomDataSource({ url }); }
 });
+
 async function startGateway() {
     const server = new ApolloServer({
         gateway,
@@ -35,9 +55,13 @@ async function startGateway() {
                 async requestDidStart(requestContext) {
                     logger.info(`Request started: ${requestContext.request.operationName || 'anonymous operation'}`);
                     return {
-                        async didEncounterErrors(requestContext) {logger.error('Errors during request execution:', requestContext.errors);},
+                        async didEncounterErrors(requestContext) {
+                            logger.error('Errors during request execution:', requestContext.errors);
+                        },
                         async willSendResponse(requestContext) {
-                            if (requestContext.response.errors) {logger.error('Response errors:', requestContext.response.errors);}
+                            if (requestContext.response.errors) {
+                                logger.error('Response errors:', requestContext.response.errors);
+                            }
                             logger.info(`Request completed: ${requestContext.request.operationName || 'anonymous operation'}`);
                         }
                     };
@@ -45,14 +69,18 @@ async function startGateway() {
             },
             ApolloServerPluginLandingPageLocalDefault({ embed: true })
         ],
-        formatError: (error) => {logger.error('Formatted error:', error); return error;}
+        formatError: (error) => { logger.error('Formatted error:', error); return error; }
     });
     const { url } = await startStandaloneServer(server, {
         listen: { port: process.env.GATEPORT || 4000 },
-        context: async ({ req }) => {logger.info(`Request headers: ${JSON.stringify(req.headers, null, 2)}`); return {};}
+        context: async ({ req }) => {
+            logger.info(`Request headers: ${JSON.stringify(req.headers, null, 2)}`);
+            return {};
+        }
     });
     console.log(`🚀 Federated Gateway ready at ${url}`);
 }
+
 startGateway().catch(err => {
     console.error('Failed to start gateway:', err);
     process.exit(1);
