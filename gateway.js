@@ -21,7 +21,7 @@ const logger = {
     error: (message, err) => console.error(`[ERROR] ${message}`, err)
 };
 
-const SERVICE_CA_PATH = '/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt';
+const SERVICE_CA_PATH = '/run/secrets/kubernetes.io/serviceaccount/service-ca.crt';
 let secureAgent;
 
 try {
