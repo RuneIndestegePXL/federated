@@ -6,10 +6,17 @@
     "@apollo/federation": "^0.38.1",
     "@apollo/gateway": "^2.5.1",
     "@apollo/server": "^4.9.5",
+    "@apollo/server-plugin-response-cache": "^4.1.4",
     "@apollo/subgraph": "^2.10.0",
     "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
     "graphql": "^16.8.1",
-    "graphql-tag": "^2.12.6"
+    "graphql-depth-limit": "^1.1.0",
+    "graphql-query-complexity": "^1.0.0",
+    "graphql-tag": "^2.12.6",
+    "helmet": "^8.0.0",
+    "xss-clean": "^0.1.4"
   },
   "scripts": {
     "start": "node gateway.js"
