@@ -94,8 +94,8 @@ class SecureDataSource extends RemoteGraphQLDataSource {
 const gateway = new ApolloGateway({
     supergraphSdl: new IntrospectAndCompose({
         subgraphs: [
-            { name: 'order-service', url: "https://order-service.usecase-ace.svc.cluster.local:8083/graphql" },
-            { name: 'crm-service', url: "https://crm-service.usecase-ace.svc.cluster.local:8080/graphql" },
+            { name: 'order-service', url: "https://order-service.usecase-ace.svc.cluster.local:8080/graphql" },
+            { name: 'crm-proxy', url: "https://crm-proxy.usecase-ace.svc.cluster.local:8083/graphql" },
             { name: 'product-service', url: "https://prisma.usecase-ace.svc.cluster.local:4001/graphql" }
             //{ name: 'order-service', url: "https://order-service-usecase-ace.apps.sandbox.id.internal/graphql" },
             //{ name: 'crm-service', url: "https://crm-proxy-usecase-ace.apps.sandbox.id.internal/graphql" },
