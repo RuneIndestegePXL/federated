@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const { ApolloServer } = require('@apollo/server');
-const { startStandaloneServer } = require('@apollo/server/standalone');
+//const { startStandaloneServer } = require('@apollo/server/standalone');
 const { ApolloGateway, IntrospectAndCompose, RemoteGraphQLDataSource } = require('@apollo/gateway');
 const { ApolloServerPluginLandingPageLocalDefault } = require('@apollo/server/plugin/landingPage/default');
 //const { createComplexityPlugin } = require('graphql-query-complexity');
@@ -13,6 +13,9 @@ const depthLimit = require('graphql-depth-limit');
 const helmet = require('helmet');
 const xss = require('xss-clean');
 const { parse } = require('graphql');
+const {expressMiddleware} = require("@apollo/server/express4");
+const express = require('express');
+const cors = require('cors');
 require('dotenv').config();
 
 const logger = {
@@ -66,7 +69,6 @@ class SecureDataSource extends RemoteGraphQLDataSource {
         const sanitized = {};
         for (const [key, value] of Object.entries(variables)) {
             if (typeof value === 'string') {
-                // Basic string sanitization to prevent SQL injection and XSS
                 sanitized[key] = this.sanitizeString(value);
             } else if (Array.isArray(value)) {
                 sanitized[key] = value.map(item =>
@@ -163,7 +165,7 @@ async function startGateway() {
     const server = new ApolloServer({
         gateway,
         subscriptions: false,
-        introspection: process.env.NODE_ENV !== 'production', // Disable in production
+        introspection: process.env.NODE_ENV !== 'production',
         plugins: [
             {
                 async requestDidStart(requestContext) {
@@ -213,97 +215,95 @@ async function startGateway() {
             return error;
         }
     });
+    await server.start();
 
-    const { url } = await startStandaloneServer(server, {
-        listen: { port: process.env.GATEPORT || 4000 },
-        context: async ({ req }) => {
-            // Generate a unique request ID for tracing
-            const requestId = require('crypto').randomUUID();
+    const app = express();
 
-            return {
-                clientIp: req.ip || req.connection.remoteAddress,
-                userAgent: req.headers['user-agent'],
-                requestId
-            };
-        },
-        expressMiddleware: {
-            app: undefined, // This will be created by startStandaloneServer
-            path: '/',
-            cors: {
-                origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : '*',
-                credentials: true,
-                methods: ['POST', 'OPTIONS'], // Restrict to just what's needed
-                allowedHeaders: ['Content-Type', 'Authorization'],
-                maxAge: 86400, // 24 hours
+    app.use(helmet({
+        contentSecurityPolicy: {
+            directives: {
+                defaultSrc: ["'self'"],
+                scriptSrc: ["'self'", "'unsafe-inline'"],
+                styleSrc: ["'self'", "'unsafe-inline'"],
+                imgSrc: ["'self'", "data:"],
+                connectSrc: ["'self'"],
+                fontSrc: ["'self'"],
+                objectSrc: ["'none'"],
+                mediaSrc: ["'self'"],
+                frameSrc: ["'none'"],
+                workerSrc: ["'self'", "blob:"],
             },
-            onBeforeMiddleware: (app) => {
-                const limiter = rateLimit({
-                    windowMs: 15 * 60 * 1000, // 15 minutes
-                    max: 100,
-                    standardHeaders: true,
-                    legacyHeaders: false,
-                    message: 'Too many requests, please try again after 15 minutes',
-                });
-                app.use(limiter);
+        },
+        xssFilter: true,
+        noSniff: true,
+        hsts: {
+            maxAge: 31536000,
+            includeSubDomains: true,
+            preload: true
+        },
+        frameguard: {
+            action: 'deny'
+        },
+        referrerPolicy: { policy: 'same-origin' }
+    }));
 
-                app.use(helmet({
-                    contentSecurityPolicy: {
-                        directives: {
-                            defaultSrc: ["'self'"],
-                            scriptSrc: ["'self'", "'unsafe-inline'"], // Allow inline scripts for Apollo Explorer
-                            styleSrc: ["'self'", "'unsafe-inline'"],  // Allow inline styles for Apollo Explorer
-                            imgSrc: ["'self'", "data:"],
-                            connectSrc: ["'self'"],
-                            fontSrc: ["'self'"],
-                            objectSrc: ["'none'"],
-                            mediaSrc: ["'self'"],
-                            frameSrc: ["'none'"],
-                            workerSrc: ["'self'", "blob:"],  // Allow workers for Apollo Explorer
-                        },
-                    },
-                    xssFilter: true,
-                    noSniff: true,
-                    hsts: {
-                        maxAge: 31536000,
-                        includeSubDomains: true,
-                        preload: true
-                    },
-                    frameguard: {
-                        action: 'deny'
-                    },
-                    referrerPolicy: { policy: 'same-origin' }
-                }));
+    // Rate limiting
+    const limiter = rateLimit({
+        windowMs: 15 * 60 * 1000,
+        max: 100,
+        standardHeaders: true,
+        legacyHeaders: false,
+        message: 'Too many requests, please try again after 15 minutes'
+    });
+    app.use(limiter);
 
-                app.use(xss());
+    app.use(xss());
+    app.use(express.json({ limit: '100kb' }));
 
-                app.use(require('express').json({ limit: '100kb' }));
+    app.use((req, res, next) => {
+        logger.info(`${req.method} ${req.originalUrl} - ${req.ip}`);
+        next();
+    });
 
-                app.use((req, res, next) => {
-                    logger.info(`${req.method} ${req.originalUrl} - ${req.ip}`);
-                    next();
-                });
+    app.use((req, res, next) => {
+        if (req.body && req.body.query) {
+            try {
+                const query = req.body.query.toLowerCase();
+                const suspiciousTerms = ['union select', 'information_schema', 'sleep(', '--', '/*', '*/'];
 
-                app.use((req, res, next) => {
-                    if (req.body && req.body.query) {
-                        try {
-                            const query = req.body.query.toLowerCase();
-                            const suspiciousTerms = ['union select', 'information_schema', 'sleep(', '--', '/*', '*/'];
-
-                            if (suspiciousTerms.some(term => query.includes(term))) {
-                                return res.status(403).json({
-                                    errors: [{ message: 'Forbidden query pattern detected' }]
-                                });
-                            }
-                        } catch (error) {
-                            logger.error('Error in security middleware:', error);
-                        }
-                    }
-                    next();
-                });
+                if (suspiciousTerms.some(term => query.includes(term))) {
+                    return res.status(403).json({
+                        errors: [{ message: 'Forbidden query pattern detected' }]
+                    });
+                }
+            } catch (error) {
+                logger.error('Error in security middleware:', error);
             }
         }
+        next();
     });
-    console.log(`🚀 Federated Gateway ready at ${url}`);
+
+    app.use('/',
+        cors({
+            origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : '*',
+            credentials: true,
+            methods: ['POST', 'OPTIONS', 'GET', 'PATCH', 'DELETE'],
+            allowedHeaders: ['Content-Type', 'Authorization'],
+            maxAge: 86400
+        }),
+        expressMiddleware(server, {
+            context: async ({ req }) => ({
+                clientIp: req.ip || req.socket.remoteAddress,
+                userAgent: req.headers['user-agent'],
+                requestId: require('crypto').randomUUID()
+            })
+        })
+    );
+
+    const port = process.env.GATEPORT || 4000;
+    app.listen(port, () => {
+        console.log(`🚀 Federated Gateway ready at http://localhost:${port}`);
+    });
 }
 
 startGateway().catch(err => {
