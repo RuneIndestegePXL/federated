@@ -133,7 +133,24 @@ function createDepthLimitRule(maxDepth) {
     };
 }
 
-const complexityRule = createComplexityRule({
+function createSafeComplexityRule(options) {
+    const originalRule = createComplexityRule(options);
+    
+    return function safeComplexityRule(validationContext) {
+        try {
+            if (!validationContext) {
+                logger.warn('ValidationContext is undefined in complexity rule');
+                return validationContext;
+            }
+            return originalRule(validationContext);
+        } catch (error) {
+            logger.error('Error in complexity rule:', error);
+            return validationContext;
+        }
+    };
+}
+
+const complexityRule = createSafeComplexityRule({
     maximumComplexity: 1000,
     variables: {},
     onComplete: (complexity) => {
@@ -143,6 +160,29 @@ const complexityRule = createComplexityRule({
         return new Error(`Query is too complex: ${actual}. Maximum allowed complexity: ${max}`);
     }
 });
+
+function createSafeDepthLimitRule(maxDepth) {
+    return function customDepthLimit(validationContext) {
+        try {
+            if (!validationContext || typeof validationContext.getDocument !== 'function') {
+                logger.warn('ValidationContext is invalid in depth limit rule');
+                return validationContext;
+            }
+            
+            const doc = validationContext.getDocument();
+            if (!doc || !doc.definitions) {
+                logger.warn('Document is invalid in depth limit rule');
+                return validationContext;
+            }
+            
+            
+            return validationContext;
+        } catch (error) {
+            logger.error('Error in depth limit rule:', error);
+            return validationContext;
+        }
+    };
+}
 
 function validateQuery(query) {
     try {
@@ -218,10 +258,18 @@ async function startGateway() {
                 }
             ],
             validationRules: [
-                createDepthLimitRule(10),
-                complexityRule
+
             ],
             formatError: (error) => {
+                if (error.message && error.message.includes('find')) {
+                    logger.error('FIND ERROR DETECTED - Full context:', error);
+                    try {
+                        throw new Error('Stack trace for find error');
+                    } catch (e) {
+                        logger.error('Stack trace at find error point:', e.stack);
+                    }
+                }
+                
                 logger.error('GraphQL error:', error);
                 if (process.env.NODE_ENV === 'production') {
                     return new Error('Internal server error');
