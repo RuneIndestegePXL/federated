@@ -170,22 +170,22 @@ async function startGateway() {
             {
                 async requestDidStart(requestContext) {
                     try {
-                        if (requestContext.request.query) {
+                        if (requestContext.request && requestContext.request.query) {
                             validateQuery(requestContext.request.query);
                         }
 
                         const requestId = require('crypto').randomUUID();
-                        requestContext.contextValue = {
-                            ...requestContext.contextValue,
-                            requestId
-                        };
+                        requestContext.contextValue = requestContext.contextValue || {};
+                        requestContext.contextValue.requestId = requestId;
 
                         return {
                             async didResolveOperation({ request, document }) {
+                                if (!document) return;
+                                
                                 const maxDepth = 10;
                                 const depths = depthLimit(maxDepth)(document, {}, {});
 
-                                if (depths.length > 0) {
+                                if (depths && depths.length > 0) {
                                     throw new Error(`Query exceeds maximum depth of ${maxDepth}`);
                                 }
                             },
@@ -197,6 +197,7 @@ async function startGateway() {
                             }
                         };
                     } catch (error) {
+                        logger.error('Error in requestDidStart:', error);
                         throw new Error(`Security validation failed: ${error.message}`);
                     }
                 }
@@ -256,17 +257,16 @@ async function startGateway() {
         message: 'Too many requests, please try again after 15 minutes'
     });
     app.use(limiter);
-
+    app.set('trust proxy', true);
     app.use(xss());
     app.use(express.json({ limit: '100kb' }));
-
     app.use((req, res, next) => {
         logger.info(`${req.method} ${req.originalUrl} - ${req.ip}`);
         next();
     });
 
     app.use((req, res, next) => {
-        if (req.body && req.body.query) {
+        if (req.body && typeof req.body === 'object' && req.body.query && typeof req.body.query === 'string') {
             try {
                 const query = req.body.query.toLowerCase();
                 const suspiciousTerms = ['union select', 'information_schema', 'sleep(', '--', '/*', '*/'];
@@ -302,7 +302,7 @@ async function startGateway() {
 
     const port = process.env.GATEPORT || 4000;
     app.listen(port, () => {
-        console.log(`🚀 Federated Gateway ready at http://localhost:${port}`);
+        console.log(`🚀 Federated Gateway ready at https://url:${port}`);
     });
 }
 
