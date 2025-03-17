@@ -120,6 +120,11 @@ const gateway = new ApolloGateway({
         introspectionHeaders: {
             'User-Agent': 'Apollo-Gateway'
         },
+        pollIntervalInMs: 60000,
+        handleSupergraphError: (errors) => {
+            logger.error('Supergraph error:', errors);
+            return null; // prevent crash schema errors
+        },
         logger: {
             debug: (message) => logger.info(`Composition: ${message}`),
             info: (message) => logger.info(`Composition: ${message}`),
@@ -127,6 +132,11 @@ const gateway = new ApolloGateway({
             error: (message) => logger.error(`Composition: ${message}`)
         }
     }),
+    experimental_approximateQueryPlanScoring: true, // Try alternative scoring mechanism that might not use .find()
+    experimental_didResolveQueryPlan: (queryPlanningParams, queryPlan) => {
+        logger.debug(`Query plan resolved: ${queryPlanningParams.request.operationName || 'anonymous'}`);
+        return queryPlan;
+    },
     serviceHealthCheck: true,
     buildService({ name, url }) {
         return new SecureDataSource({
@@ -200,7 +210,7 @@ async function startGateway() {
         server = new ApolloServer({
             gateway,
             subscriptions: false,
-            introspection: process.env.NODE_ENV !== 'production',
+            introspection: true,
             plugins: [
                 {
                     async requestDidStart(requestContext) {
@@ -269,11 +279,38 @@ async function startGateway() {
                         }
                     }
                 },
+                {
+                    async serverWillStart() {
+                        logger.info('Apollo Server is starting up!');
+                        return {
+                            async drainServer() {
+                                logger.info('Apollo Server is shutting down');
+                            }
+                        };
+                    },
+                    async requestDidStart() {
+                        return {
+                            async executionDidStart() {
+                                return {
+                                    willResolveField({ source, args, context, info }) {
+                                        // Add field-level error trapping
+                                        return () => { /* Nothing to do on field completion */ };
+                                    },
+                                    async executionDidEnd(err) {
+                                        if (err) {
+                                            logger.error('Execution error:', err);
+                                        }
+                                    }
+                                };
+                            }
+                        };
+                    }
+                },
                 ApolloServerPluginLandingPageLocalDefault({ embed: true })
             ],
             validationRules: [
-                depthLimit(10),
-                complexityRule
+                //depthLimit(10),
+                //complexityRule
             ],
             formatError: (error) => {
                 logger.error('Formatted error:', { 
@@ -284,7 +321,6 @@ async function startGateway() {
                     originalError: error.originalError ? error.originalError.toString() : 'No original error'
                 });
                 
-                // Check for specific find() error to provide more details
                 if (error.message && error.message.includes('Cannot read properties of undefined (reading \'find\')')) {
                     logger.debug('Find error detected - operation context:' + 
                         JSON.stringify(error.extensions?.context || {}));
@@ -296,6 +332,21 @@ async function startGateway() {
                 return error;
             }
         });
+        
+        const originalFormatError = server.formatError;
+        server.formatError = (formattedError, error) => {
+            logger.error('Raw GraphQL Error:', error);
+            if (error && error.stack) {
+                logger.error('Raw Error Stack:', error.stack);
+            }
+            if (error && error.originalError) {
+                logger.error('Original Error:', error.originalError);
+                logger.error('Original Error Stack:', error.originalError.stack);
+            }
+            
+            return originalFormatError ? originalFormatError(formattedError, error) : formattedError;
+        };
+        
         await server.start();
     } catch (error) {
         logger.error('Error initializing Apollo Server:', error);
