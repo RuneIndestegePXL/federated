@@ -31,16 +31,21 @@ try {
     if (fs.existsSync(SERVICE_CA_PATH)) {
         const caCert = fs.readFileSync(SERVICE_CA_PATH);
         secureAgent = new https.Agent({
-            ca: caCert
+            ca: caCert,
+            rejectUnauthorized: false // Add this line to accept self-signed certificates
         });
         logger.info('Successfully loaded service CA certificate');
     } else {
         logger.warn('Service CA certificate not found at: ' + SERVICE_CA_PATH);
-        secureAgent = new https.Agent();
+        secureAgent = new https.Agent({
+            rejectUnauthorized: false // Add this line to accept self-signed certificates
+        });
     }
 } catch (error) {
     logger.error('Error loading service CA certificate:', error);
-    secureAgent = new https.Agent();
+    secureAgent = new https.Agent({
+        rejectUnauthorized: false // Add this line to accept self-signed certificates
+    });
 }
 
 class SecureDataSource extends RemoteGraphQLDataSource {
@@ -96,12 +101,14 @@ class SecureDataSource extends RemoteGraphQLDataSource {
 const gateway = new ApolloGateway({
     supergraphSdl: new IntrospectAndCompose({
         subgraphs: [
-            //{ name: 'order-service', url: "http://order-service.usecase-ace.svc.cluster.local:8080/graphql" },
-            //{ name: 'crm-proxy', url: "http://crm-proxy.usecase-ace.svc.cluster.local:8083/graphql" },
-            //{ name: 'product-service', url: "http://prisma.usecase-ace.svc.cluster.local:4001/graphql" }
-            { name: 'order-service', url: "https://order-service-usecase-ace.apps.sandbox.id.internal/graphql" },
-            { name: 'crm-proxy', url: "https://crm-proxy-usecase-ace.apps.sandbox.id.internal/graphql" },
-            { name: 'product-service', url: "https://prisma-usecase-ace.apps.sandbox.id.internal/graphql" }
+            // Use internal cluster URLs with HTTP instead of HTTPS
+            { name: 'order-service', url: "http://order-service.usecase-ace.svc.cluster.local:8080/graphql" },
+            { name: 'crm-proxy', url: "http://crm-proxy.usecase-ace.svc.cluster.local:8083/graphql" },
+            { name: 'product-service', url: "http://prisma.usecase-ace.svc.cluster.local:4001/graphql" }
+            // Keep these as fallback options if internal URLs don't work
+            // { name: 'order-service', url: "https://order-service-usecase-ace.apps.sandbox.id.internal/graphql" },
+            // { name: 'crm-proxy', url: "https://crm-proxy-usecase-ace.apps.sandbox.id.internal/graphql" },
+            // { name: 'product-service', url: "https://prisma-usecase-ace.apps.sandbox.id.internal/graphql" }
         ],
         introspectionHeaders: {
             'User-Agent': 'Apollo-Gateway'
