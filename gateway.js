@@ -18,10 +18,19 @@ const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 
+// Enhance the logger to capture more details
 const logger = {
     info: (message) => console.log(`[INFO] ${message}`),
     warn: (message) => console.warn(`[WARN] ${message}`),
-    error: (message, err) => console.error(`[ERROR] ${message}`, err)
+    error: (message, err) => {
+        if (err && err.stack) {
+            console.error(`[ERROR] ${message}`, err);
+            console.error(`[ERROR STACK] ${err.stack}`);
+        } else {
+            console.error(`[ERROR] ${message}`, err || '');
+        }
+    },
+    debug: (message) => console.log(`[DEBUG] ${message}`)
 };
 
 const SERVICE_CA_PATH = '/run/secrets/kubernetes.io/serviceaccount/service-ca.crt';
@@ -128,6 +137,17 @@ const gateway = new ApolloGateway({
     }
 });
 
+// Patch the ApolloGateway's methods that might be using 'find'
+const originalBuildService = gateway.buildService;
+gateway.buildService = function(options) {
+    try {
+        return originalBuildService.call(this, options);
+    } catch (error) {
+        logger.error('Error in buildService:', error);
+        throw error;
+    }
+};
+
 const complexityRule = createComplexityRule({
     maximumComplexity: 1000,
     onComplete: (complexity) => {
@@ -168,99 +188,116 @@ function validateQuery(query) {
 }
 
 async function startGateway() {
-    const server = new ApolloServer({
-        gateway,
-        subscriptions: false,
-        introspection: process.env.NODE_ENV !== 'production',
-        plugins: [
-            {
-                async requestDidStart(requestContext) {
-                    try {
-                        logger.info(`Request started: ${JSON.stringify({
-                            operationName: requestContext.request?.operationName || 'unknown',
-                            query: requestContext.request?.query ? 'present' : 'not present',
-                            variables: requestContext.request?.variables ? 'present' : 'not present'
-                        })}`);
-                        
-                        if (requestContext.request && requestContext.request.query) {
-                            validateQuery(requestContext.request.query);
-                        }
+    try {
+        // Attach unhandled rejection handler to catch any promise errors
+        process.on('unhandledRejection', (reason, promise) => {
+            logger.error('Unhandled Rejection at:', { reason, promise });
+        });
 
-                        const requestId = require('crypto').randomUUID();
-                        requestContext.contextValue = requestContext.contextValue || {};
-                        requestContext.contextValue.requestId = requestId;
+        const server = new ApolloServer({
+            gateway,
+            subscriptions: false,
+            introspection: process.env.NODE_ENV !== 'production',
+            plugins: [
+                {
+                    async requestDidStart(requestContext) {
+                        try {
+                            logger.info(`Request started: ${JSON.stringify({
+                                operationName: requestContext.request?.operationName || 'unknown',
+                                query: requestContext.request?.query ? 'present' : 'not present',
+                                variables: requestContext.request?.variables ? 'present' : 'not present'
+                            })}`);
+                            
+                            if (requestContext.request && requestContext.request.query) {
+                                validateQuery(requestContext.request.query);
+                            }
 
-                        return {
-                            async didResolveOperation({ request, document }) {
-                                try {
-                                    if (!document) {
-                                        logger.warn(`No document available for operation ${request?.operationName || 'unknown'}`);
-                                        return;
+                            const requestId = require('crypto').randomUUID();
+                            requestContext.contextValue = requestContext.contextValue || {};
+                            requestContext.contextValue.requestId = requestId;
+
+                            return {
+                                async didResolveOperation({ request, document }) {
+                                    try {
+                                        if (!document) {
+                                            logger.warn(`No document available for operation ${request?.operationName || 'unknown'}`);
+                                            return;
+                                        }
+                                        
+                                        const maxDepth = 10;
+                                        const depths = depthLimit(maxDepth)(document, {}, {});
+
+                                        if (depths && depths.length > 0) {
+                                            throw new Error(`Query exceeds maximum depth of ${maxDepth}`);
+                                        }
+                                    } catch (error) {
+                                        logger.error('Error in didResolveOperation:', error);
+                                        throw error;
                                     }
-                                    
-                                    const maxDepth = 10;
-                                    const depths = depthLimit(maxDepth)(document, {}, {});
-
-                                    if (depths && depths.length > 0) {
-                                        throw new Error(`Query exceeds maximum depth of ${maxDepth}`);
-                                    }
-                                } catch (error) {
-                                    logger.error('Error in didResolveOperation:', error);
-                                    throw error;
-                                }
-                            },
-                            async didEncounterErrors(requestContext) {
-                                try {
-                                    const errors = requestContext.errors || [];
-                                    logger.error(`Request ${requestId} errors:`, errors.map(e => e.message || e).join(', '));
-                                    
-                                    errors.forEach((error, index) => {
-                                        logger.error(`Error ${index + 1}:`, {
-                                            message: error.message,
-                                            path: error.path,
-                                            locations: error.locations,
-                                            stack: error.stack
+                                },
+                                async didEncounterErrors(requestContext) {
+                                    try {
+                                        const errors = requestContext.errors || [];
+                                        logger.error(`Request ${requestId} errors:`, errors.map(e => e.message || e).join(', '));
+                                        
+                                        errors.forEach((error, index) => {
+                                            logger.error(`Error ${index + 1}:`, {
+                                                message: error.message,
+                                                path: error.path,
+                                                locations: error.locations,
+                                                stack: error.stack
+                                            });
                                         });
-                                    });
-                                } catch (error) {
-                                    logger.error('Error in didEncounterErrors:', error);
+                                    } catch (error) {
+                                        logger.error('Error in didEncounterErrors:', error);
+                                    }
+                                },
+                                async willSendResponse(requestContext) {
+                                    logger.info(`Request ${requestId} completed: ${requestContext.request.operationName || 'anonymous operation'}`);
                                 }
-                            },
-                            async willSendResponse(requestContext) {
-                                logger.info(`Request ${requestId} completed: ${requestContext.request.operationName || 'anonymous operation'}`);
-                            }
-                        };
-                    } catch (error) {
-                        logger.error('Error in requestDidStart:', error);
-                        return {
-                            async didEncounterErrors(requestContext) {
-                                logger.error('Errors from earlier failure:', requestContext.errors);
-                            }
-                        };
+                            };
+                        } catch (error) {
+                            logger.error('Error in requestDidStart:', error);
+                            return {
+                                async didEncounterErrors(requestContext) {
+                                    logger.error('Errors from earlier failure:', requestContext.errors);
+                                }
+                            };
+                        }
                     }
+                },
+                ApolloServerPluginLandingPageLocalDefault({ embed: true })
+            ],
+            validationRules: [
+                depthLimit(10),
+                complexityRule
+            ],
+            formatError: (error) => {
+                logger.error('Formatted error:', { 
+                    message: error.message, 
+                    locations: error.locations,
+                    path: error.path,
+                    stack: error.stack || 'No stack trace',
+                    originalError: error.originalError ? error.originalError.toString() : 'No original error'
+                });
+                
+                // Check for specific find() error to provide more details
+                if (error.message && error.message.includes('Cannot read properties of undefined (reading \'find\')')) {
+                    logger.debug('Find error detected - operation context:' + 
+                        JSON.stringify(error.extensions?.context || {}));
                 }
-            },
-            ApolloServerPluginLandingPageLocalDefault({ embed: true })
-        ],
-        validationRules: [
-            depthLimit(10),
-            complexityRule
-        ],
-        formatError: (error) => {
-            logger.error('Formatted error:', { 
-                message: error.message, 
-                locations: error.locations,
-                path: error.path,
-                stack: error.stack || 'No stack trace'
-            });
-            
-            if (process.env.NODE_ENV === 'production') {
-                return new Error('Internal server error');
+                
+                if (process.env.NODE_ENV === 'production') {
+                    return new Error('Internal server error');
+                }
+                return error;
             }
-            return error;
-        }
-    });
-    await server.start();
+        });
+        await server.start();
+    } catch (error) {
+        logger.error('Error initializing Apollo Server:', error);
+        throw error;
+    }
 
     const app = express();
 
@@ -354,6 +391,31 @@ async function startGateway() {
                     errors: [{ message: 'Invalid request format' }]
                 });
             }
+        },
+        (req, res, next) => {
+            // Add global error handler middleware for Express
+            try {
+                const originalEnd = res.end;
+                res.end = function(...args) {
+                    if (res.statusCode >= 400) {
+                        logger.error(`Error response: ${res.statusCode}`, { 
+                            body: res._body,
+                            path: req.path,
+                            query: req.body?.query?.substring(0, 100)
+                        });
+                    }
+                    return originalEnd.apply(this, args);
+                };
+                next();
+            } catch (error) {
+                logger.error('Error in response interceptor:', error);
+                next();
+            }
+        },
+        (err, req, res, next) => {
+            // Express error handler
+            logger.error('Express middleware error:', err);
+            next(err);
         },
         expressMiddleware(server, {
             context: async ({ req }) => {
