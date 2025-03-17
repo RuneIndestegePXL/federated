@@ -261,10 +261,21 @@ async function startGateway() {
         max: 100,
         standardHeaders: true,
         legacyHeaders: false,
-        message: 'Too many requests, please try again after 15 minutes'
+        message: 'Too many requests, please try again after 15 minutes',
+        // Add configuration to properly handle proxies
+        skipFailedRequests: true,
+        keyGenerator: (req) => {
+            // Use a more reliable way to get IP address in your environment
+            return req.ip || req.socket.remoteAddress || '127.0.0.1';
+        },
+        // Disable the trust proxy validation
+        validate: { trustProxy: false }
     });
     app.use(limiter);
-    app.set('trust proxy', true);
+    
+    // Configure trust proxy more specifically - trust only first proxy
+    app.set('trust proxy', 1);
+
     app.use(xss());
     app.use(express.json({ limit: '100kb' }));
     app.use((req, res, next) => {
@@ -299,11 +310,21 @@ async function startGateway() {
             maxAge: 86400
         }),
         expressMiddleware(server, {
-            context: async ({ req }) => ({
-                clientIp: req.ip || req.socket.remoteAddress,
-                userAgent: req.headers['user-agent'],
-                requestId: require('crypto').randomUUID()
-            })
+            context: async ({ req }) => {
+                try {
+                    return {
+                        clientIp: req.ip || req.socket.remoteAddress || '127.0.0.1',
+                        userAgent: req.headers ? req.headers['user-agent'] : undefined,
+                        requestId: require('crypto').randomUUID()
+                    };
+                } catch (error) {
+                    console.error("Error creating context:", error);
+                    return {
+                        clientIp: '127.0.0.1',
+                        requestId: require('crypto').randomUUID()
+                    };
+                }
+            }
         })
     );
 
