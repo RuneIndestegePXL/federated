@@ -32,19 +32,19 @@ try {
         const caCert = fs.readFileSync(SERVICE_CA_PATH);
         secureAgent = new https.Agent({
             ca: caCert,
-            rejectUnauthorized: false // Add this line to accept self-signed certificates
+            rejectUnauthorized: false 
         });
         logger.info('Successfully loaded service CA certificate');
     } else {
         logger.warn('Service CA certificate not found at: ' + SERVICE_CA_PATH);
         secureAgent = new https.Agent({
-            rejectUnauthorized: false // Add this line to accept self-signed certificates
+            rejectUnauthorized: false 
         });
     }
 } catch (error) {
     logger.error('Error loading service CA certificate:', error);
     secureAgent = new https.Agent({
-        rejectUnauthorized: false // Add this line to accept self-signed certificates
+        rejectUnauthorized: false
     });
 }
 
@@ -101,11 +101,9 @@ class SecureDataSource extends RemoteGraphQLDataSource {
 const gateway = new ApolloGateway({
     supergraphSdl: new IntrospectAndCompose({
         subgraphs: [
-            // Use internal cluster URLs with HTTP instead of HTTPS
             { name: 'order-service', url: "http://order-service.usecase-ace.svc.cluster.local:8080/graphql" },
             { name: 'crm-proxy', url: "http://crm-proxy.usecase-ace.svc.cluster.local:8083/graphql" },
             { name: 'product-service', url: "http://prisma.usecase-ace.svc.cluster.local:4001/graphql" }
-            // Keep these as fallback options if internal URLs don't work
             // { name: 'order-service', url: "https://order-service-usecase-ace.apps.sandbox.id.internal/graphql" },
             // { name: 'crm-proxy', url: "https://crm-proxy-usecase-ace.apps.sandbox.id.internal/graphql" },
             // { name: 'product-service', url: "https://prisma-usecase-ace.apps.sandbox.id.internal/graphql" }
@@ -142,13 +140,13 @@ const complexityRule = createComplexityRule({
 
 function validateQuery(query) {
     try {
+        if (typeof query !== 'string') {
+            logger.warn(`Query validation received non-string query: ${typeof query}`);
+            return null;
+        }
+        
         const parsedQuery = parse(query);
         const queryString = query.toString().toLowerCase();
-
-        if (process.env.DISABLE_INTROSPECTION === 'true' &&
-            (queryString.includes('__schema') || queryString.includes('__type'))) {
-            throw new Error('Introspection queries are disabled');
-        }
 
         const suspiciousPatterns = [
             'sleep(', 'benchmark(', 'pg_sleep', 'waitfor delay',
@@ -164,6 +162,7 @@ function validateQuery(query) {
 
         return parsedQuery;
     } catch (error) {
+        logger.error('Query validation failed:', error);
         throw new Error(`Query validation failed: ${error.message}`);
     }
 }
@@ -177,6 +176,12 @@ async function startGateway() {
             {
                 async requestDidStart(requestContext) {
                     try {
+                        logger.info(`Request started: ${JSON.stringify({
+                            operationName: requestContext.request?.operationName || 'unknown',
+                            query: requestContext.request?.query ? 'present' : 'not present',
+                            variables: requestContext.request?.variables ? 'present' : 'not present'
+                        })}`);
+                        
                         if (requestContext.request && requestContext.request.query) {
                             validateQuery(requestContext.request.query);
                         }
@@ -187,17 +192,39 @@ async function startGateway() {
 
                         return {
                             async didResolveOperation({ request, document }) {
-                                if (!document) return;
-                                
-                                const maxDepth = 10;
-                                const depths = depthLimit(maxDepth)(document, {}, {});
+                                try {
+                                    if (!document) {
+                                        logger.warn(`No document available for operation ${request?.operationName || 'unknown'}`);
+                                        return;
+                                    }
+                                    
+                                    const maxDepth = 10;
+                                    const depths = depthLimit(maxDepth)(document, {}, {});
 
-                                if (depths && depths.length > 0) {
-                                    throw new Error(`Query exceeds maximum depth of ${maxDepth}`);
+                                    if (depths && depths.length > 0) {
+                                        throw new Error(`Query exceeds maximum depth of ${maxDepth}`);
+                                    }
+                                } catch (error) {
+                                    logger.error('Error in didResolveOperation:', error);
+                                    throw error;
                                 }
                             },
                             async didEncounterErrors(requestContext) {
-                                logger.error(`Request ${requestId} errors:`, requestContext.errors);
+                                try {
+                                    const errors = requestContext.errors || [];
+                                    logger.error(`Request ${requestId} errors:`, errors.map(e => e.message || e).join(', '));
+                                    
+                                    errors.forEach((error, index) => {
+                                        logger.error(`Error ${index + 1}:`, {
+                                            message: error.message,
+                                            path: error.path,
+                                            locations: error.locations,
+                                            stack: error.stack
+                                        });
+                                    });
+                                } catch (error) {
+                                    logger.error('Error in didEncounterErrors:', error);
+                                }
                             },
                             async willSendResponse(requestContext) {
                                 logger.info(`Request ${requestId} completed: ${requestContext.request.operationName || 'anonymous operation'}`);
@@ -205,7 +232,11 @@ async function startGateway() {
                         };
                     } catch (error) {
                         logger.error('Error in requestDidStart:', error);
-                        throw new Error(`Security validation failed: ${error.message}`);
+                        return {
+                            async didEncounterErrors(requestContext) {
+                                logger.error('Errors from earlier failure:', requestContext.errors);
+                            }
+                        };
                     }
                 }
             },
@@ -216,7 +247,13 @@ async function startGateway() {
             complexityRule
         ],
         formatError: (error) => {
-            logger.error('Formatted error:', error);
+            logger.error('Formatted error:', { 
+                message: error.message, 
+                locations: error.locations,
+                path: error.path,
+                stack: error.stack || 'No stack trace'
+            });
+            
             if (process.env.NODE_ENV === 'production') {
                 return new Error('Internal server error');
             }
@@ -262,18 +299,14 @@ async function startGateway() {
         standardHeaders: true,
         legacyHeaders: false,
         message: 'Too many requests, please try again after 15 minutes',
-        // Add configuration to properly handle proxies
         skipFailedRequests: true,
         keyGenerator: (req) => {
-            // Use a more reliable way to get IP address in your environment
             return req.ip || req.socket.remoteAddress || '127.0.0.1';
         },
-        // Disable the trust proxy validation
         validate: { trustProxy: false }
     });
     app.use(limiter);
     
-    // Configure trust proxy more specifically - trust only first proxy
     app.set('trust proxy', 1);
 
     app.use(xss());
@@ -309,16 +342,31 @@ async function startGateway() {
             allowedHeaders: ['Content-Type', 'Authorization'],
             maxAge: 86400
         }),
+        (req, res, next) => {
+            try {
+                if (req.body && req.body.query) {
+                    logger.info(`Processing GraphQL query: ${req.body.query.substring(0, 50)}...`);
+                }
+                next();
+            } catch (error) {
+                logger.error('Error in pre-Apollo middleware:', error);
+                res.status(400).json({
+                    errors: [{ message: 'Invalid request format' }]
+                });
+            }
+        },
         expressMiddleware(server, {
             context: async ({ req }) => {
                 try {
-                    return {
-                        clientIp: req.ip || req.socket.remoteAddress || '127.0.0.1',
+                    const context = {
+                        clientIp: req.ip || req.socket?.remoteAddress || '127.0.0.1',
                         userAgent: req.headers ? req.headers['user-agent'] : undefined,
                         requestId: require('crypto').randomUUID()
                     };
+                    logger.info(`Created context: ${JSON.stringify(context)}`);
+                    return context;
                 } catch (error) {
-                    console.error("Error creating context:", error);
+                    logger.error("Error creating context:", error);
                     return {
                         clientIp: '127.0.0.1',
                         requestId: require('crypto').randomUUID()
