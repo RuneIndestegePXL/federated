@@ -13,7 +13,6 @@ const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 
-// Enhance the logger to capture more details
 const logger = {
     info: (message) => console.log(`[INFO] ${message}`),
     warn: (message) => console.warn(`[WARN] ${message}`),
@@ -27,7 +26,7 @@ const logger = {
     },
     debug: (message) => console.log(`[DEBUG] ${message}`)
 };
-
+/*
 // Add safeguards against "find" issue - patch Array and Object prototypes
 // This is an extreme measure but might help identify where the error is happening
 const originalArrayFind = Array.prototype.find;
@@ -43,8 +42,8 @@ Array.prototype.find = function() {
         return undefined;
     }
 };
+*/
 
-// Configure secure agent for HTTPS requests
 const SERVICE_CA_PATH = '/run/secrets/kubernetes.io/serviceaccount/service-ca.crt';
 let secureAgent;
 
@@ -86,10 +85,9 @@ class SecureDataSource extends RemoteGraphQLDataSource {
     }
 }
 
-// Create the simplest possible gateway configuration
 const gateway = new ApolloGateway({
-    debug: true, // Enable debug mode
-    __exposeQueryPlanExperimental: true, // Show query plans for debugging
+    debug: true, 
+    __exposeQueryPlanExperimental: true, 
     supergraphSdl: new IntrospectAndCompose({
         subgraphs: [
             { name: 'order-service', url: "http://order-service.usecase-ace.svc.cluster.local:8080/graphql" },
@@ -114,12 +112,9 @@ async function startGateway() {
     let server;
 
     try {
-        // Handle unhandled promise rejections
         process.on('unhandledRejection', (reason, promise) => {
             logger.error('Unhandled Rejection at:', reason);
         });
-
-        // Add a much simpler server configuration
         server = new ApolloServer({
             gateway,
             introspection: true,
@@ -150,15 +145,11 @@ async function startGateway() {
     }
 
     const app = express();
-
-    // Add middleware to diagnose requests before they reach Apollo
     app.use('/graphql', (req, res, next) => {
         if (req.method === 'POST' && req.body && req.body.query) {
             try {
                 logger.debug('Pre-Apollo GraphQL request:', req.body.query.substring(0, 100));
-                
-                // Try to parse the query to see if that's where the issue might be
-                try {
+                                try {
                     const parsedQuery = parse(req.body.query);
                     logger.debug('Query parsed successfully');
                 } catch (parseError) {
@@ -172,10 +163,9 @@ async function startGateway() {
     });
 
     app.use(helmet({
-        contentSecurityPolicy: false // Disable CSP for simplicity
+        //contentSecurityPolicy: false
     }));
 
-    // Simplified rate limiting
     const limiter = rateLimit({
         windowMs: 15 * 60 * 1000,
         max: 100,
@@ -188,7 +178,6 @@ async function startGateway() {
     app.use(xss());
     app.use(express.json({ limit: '100kb' }));
 
-    // Main GraphQL endpoint
     app.use('/',
         cors(),
         expressMiddleware(server, {
@@ -200,7 +189,6 @@ async function startGateway() {
         })
     );
 
-    // Add error handler at the end
     app.use((err, req, res, next) => {
         logger.error('Express error:', err);
         res.status(500).json({ error: 'Internal server error' });
@@ -208,7 +196,7 @@ async function startGateway() {
 
     const port = process.env.GATEPORT || 4000;
     app.listen(port, () => {
-        console.log(`🚀 Federated Gateway ready at http://localhost:${port}`);
+        console.log(`🚀 Federated Gateway ready at http://url:${port}`);
     });
 }
 
