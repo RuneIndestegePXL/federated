@@ -123,7 +123,7 @@ const gateway = new ApolloGateway({
         pollIntervalInMs: 60000,
         handleSupergraphError: (errors) => {
             logger.error('Supergraph error:', errors);
-            return null; // prevent crash schema errors
+            return null; 
         },
         logger: {
             debug: (message) => logger.info(`Composition: ${message}`),
@@ -132,7 +132,7 @@ const gateway = new ApolloGateway({
             error: (message) => logger.error(`Composition: ${message}`)
         }
     }),
-    experimental_approximateQueryPlanScoring: true, // Try alternative scoring mechanism that might not use .find()
+    experimental_approximateQueryPlanScoring: true,
     experimental_didResolveQueryPlan: (queryPlanningParams, queryPlan) => {
         logger.debug(`Query plan resolved: ${queryPlanningParams.request.operationName || 'anonymous'}`);
         return queryPlan;
@@ -147,7 +147,6 @@ const gateway = new ApolloGateway({
     }
 });
 
-// Patch the ApolloGateway's methods that might be using 'find'
 const originalBuildService = gateway.buildService;
 gateway.buildService = function(options) {
     try {
@@ -167,6 +166,46 @@ const complexityRule = createComplexityRule({
         return new Error(`Query is too complex: ${actual}. Maximum allowed complexity: ${max}`);
     }
 });
+
+function createDepthLimitRule(maxDepth) {
+    return function depthLimitRule(validationContext) {
+        const { definitions } = validationContext.getDocument();
+        let depth = 0;
+        
+        function getNodeDepth(node, currentDepth) {
+            if (!node || !node.selectionSet) return currentDepth;
+            
+            if (node.selectionSet.selections) {
+                return Math.max(
+                    ...node.selectionSet.selections.map(selection => {
+                        if (selection.kind === 'Field') {
+                            if (selection.name.value === '__typename') return currentDepth;
+                            return getNodeDepth(selection, currentDepth + 1);
+                        }
+                        return currentDepth;
+                    })
+                );
+            }
+            
+            return currentDepth;
+        }
+        
+        for (const definition of definitions) {
+            if (definition.kind === 'OperationDefinition') {
+                const operationDepth = getNodeDepth(definition, 0);
+                depth = Math.max(depth, operationDepth);
+            }
+        }
+        
+        if (depth > maxDepth) {
+            validationContext.reportError(
+                new Error(`Query depth of ${depth} exceeds maximum depth of ${maxDepth}`)
+            );
+        }
+        
+        return validationContext;
+    };
+}
 
 function validateQuery(query) {
     try {
@@ -198,11 +237,9 @@ function validateQuery(query) {
 }
 
 async function startGateway() {
-    // Declare server variable at function scope so it's accessible throughout the function
     let server;
 
     try {
-        // Attach unhandled rejection handler to catch any promise errors
         process.on('unhandledRejection', (reason, promise) => {
             logger.error('Unhandled Rejection at:', { reason, promise });
         });
@@ -235,13 +272,6 @@ async function startGateway() {
                                         if (!document) {
                                             logger.warn(`No document available for operation ${request?.operationName || 'unknown'}`);
                                             return;
-                                        }
-                                        
-                                        const maxDepth = 10;
-                                        const depths = depthLimit(maxDepth)(document, {}, {});
-
-                                        if (depths && depths.length > 0) {
-                                            throw new Error(`Query exceeds maximum depth of ${maxDepth}`);
                                         }
                                     } catch (error) {
                                         logger.error('Error in didResolveOperation:', error);
@@ -293,8 +323,7 @@ async function startGateway() {
                             async executionDidStart() {
                                 return {
                                     willResolveField({ source, args, context, info }) {
-                                        // Add field-level error trapping
-                                        return () => { /* Nothing to do on field completion */ };
+                                        return () => { };
                                     },
                                     async executionDidEnd(err) {
                                         if (err) {
@@ -309,8 +338,8 @@ async function startGateway() {
                 ApolloServerPluginLandingPageLocalDefault({ embed: true })
             ],
             validationRules: [
-                //depthLimit(10),
-                //complexityRule
+                createDepthLimitRule(10),
+                complexityRule
             ],
             formatError: (error) => {
                 logger.error('Formatted error:', { 
@@ -447,7 +476,6 @@ async function startGateway() {
             }
         },
         (req, res, next) => {
-            // Add global error handler middleware for Express
             try {
                 const originalEnd = res.end;
                 res.end = function(...args) {
@@ -467,7 +495,6 @@ async function startGateway() {
             }
         },
         (err, req, res, next) => {
-            // Express error handler
             logger.error('Express middleware error:', err);
             next(err);
         },
