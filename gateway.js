@@ -4,10 +4,11 @@ const https = require('https');
 const { ApolloServer } = require('@apollo/server');
 const { ApolloGateway, IntrospectAndCompose, RemoteGraphQLDataSource } = require('@apollo/gateway');
 const { ApolloServerPluginLandingPageLocalDefault } = require('@apollo/server/plugin/landingPage/default');
+const { createComplexityRule } = require('graphql-query-complexity');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
 const xss = require('xss-clean');
-const { parse } = require('graphql');
+const { parse, validate, specifiedRules } = require('graphql');
 const {expressMiddleware} = require("@apollo/server/express4");
 const express = require('express');
 const cors = require('cors');
@@ -26,23 +27,6 @@ const logger = {
     },
     debug: (message) => console.log(`[DEBUG] ${message}`)
 };
-/*
-// Add safeguards against "find" issue - patch Array and Object prototypes
-// This is an extreme measure but might help identify where the error is happening
-const originalArrayFind = Array.prototype.find;
-Array.prototype.find = function() {
-    try {
-        if (!this) {
-            logger.error('Array.find called on null or undefined!', new Error().stack);
-            return undefined;
-        }
-        return originalArrayFind.apply(this, arguments);
-    } catch (e) {
-        logger.error('Error in Array.find!', e);
-        return undefined;
-    }
-};
-*/
 
 const SERVICE_CA_PATH = '/run/secrets/kubernetes.io/serviceaccount/service-ca.crt';
 let secureAgent;
@@ -108,6 +92,98 @@ const gateway = new ApolloGateway({
     }
 });
 
+function createDepthLimitRule(maxDepth) {
+    return function customDepthLimit(context) {
+        const { definitions } = context.getDocument();
+
+        function calculateDepth(selectionSet, depth = 0) {
+            if (!selectionSet) return depth;
+            
+            let maxDepthFound = depth;
+            
+            for (const selection of selectionSet.selections) {
+                if (selection.kind === 'Field') {
+                    if (selection.name.value === '__typename') continue;
+                    
+                    if (selection.selectionSet) {
+                        const fieldDepth = calculateDepth(selection.selectionSet, depth + 1);
+                        maxDepthFound = Math.max(maxDepthFound, fieldDepth);
+                    }
+                } else if (selection.kind === 'InlineFragment' && selection.selectionSet) {
+                    const fragmentDepth = calculateDepth(selection.selectionSet, depth);
+                    maxDepthFound = Math.max(maxDepthFound, fragmentDepth);
+                }
+            }
+            
+            return maxDepthFound;
+        }
+
+        for (const def of definitions) {
+            if (def.kind === 'OperationDefinition' && def.selectionSet) {
+                const depth = calculateDepth(def.selectionSet);
+                if (depth > maxDepth) {
+                    context.reportError(
+                        new Error(`Query exceeds maximum depth of ${maxDepth}. Got depth of ${depth}.`)
+                    );
+                }
+            }
+        }
+        
+        return context;
+    };
+}
+
+const complexityRule = createComplexityRule({
+    maximumComplexity: 1000,
+    variables: {},
+    onComplete: (complexity) => {
+        logger.info(`Query complexity: ${complexity}`);
+    },
+    createError: (max, actual) => {
+        return new Error(`Query is too complex: ${actual}. Maximum allowed complexity: ${max}`);
+    }
+});
+
+function validateQuery(query) {
+    try {
+        const parsedQuery = parse(query);
+        const queryString = query.toLowerCase();
+        
+        const sqlPatterns = [
+            'union select', 'select *', 'select 1', 'select @@version',
+            'waitfor delay', 'sleep(', 'benchmark(', 'pg_sleep',
+            'having 1=1', 'or 1=1', 'and 1=1',
+            'exec ', 'execute ', 'sp_executesql',
+            'insert into', 'update set', 'delete from',
+            'drop table', 'drop database', 'create table',
+            'alter table', 'sys.tables', 'information_schema',
+            '--', '/*', '*/", "#', '\'\'=\'\''
+        ];
+        
+        const xssPatterns = [
+            '<script>', '</script>', 'javascript:', 'onerror=',
+            'onload=', 'eval(', 'document.cookie', 'alert(',
+            'String.fromCharCode(', 'fromCharCode',
+            'expression(', 'url(javascript', '<img src=',
+            'document.write', 'window.location'
+        ];
+        
+        const injectionPatterns = [...sqlPatterns, ...xssPatterns];
+        
+        for (const pattern of injectionPatterns) {
+            if (queryString.includes(pattern)) {
+                logger.warn(`Security pattern detected in query: ${pattern}`);
+                throw new Error('Potentially malicious query detected');
+            }
+        }
+        
+        return parsedQuery;
+    } catch (error) {
+        logger.error('Query validation error:', error);
+        throw new Error(`Query validation failed: ${error.message}`);
+    }
+}
+
 async function startGateway() {
     let server;
 
@@ -127,13 +203,29 @@ async function startGateway() {
                                 if (requestContext.errors) {
                                     logger.error('GraphQL errors:', requestContext.errors);
                                 }
+                            },
+                            async didReceiveOperation({ request, document }) {
+                                try {
+                                    if (request.query) {
+                                        validateQuery(request.query);
+                                    }
+                                } catch (error) {
+                                    throw new Error(`Security validation failed: ${error.message}`);
+                                }
                             }
                         };
                     }
                 }
             ],
+            validationRules: [
+                createDepthLimitRule(10),
+                complexityRule
+            ],
             formatError: (error) => {
                 logger.error('GraphQL error:', error);
+                if (process.env.NODE_ENV === 'production') {
+                    return new Error('Internal server error');
+                }
                 return error;
             }
         });
@@ -149,7 +241,7 @@ async function startGateway() {
         if (req.method === 'POST' && req.body && req.body.query) {
             try {
                 logger.debug('Pre-Apollo GraphQL request:', req.body.query.substring(0, 100));
-                                try {
+                try {
                     const parsedQuery = parse(req.body.query);
                     logger.debug('Query parsed successfully');
                 } catch (parseError) {
@@ -163,23 +255,87 @@ async function startGateway() {
     });
 
     app.use(helmet({
-        //contentSecurityPolicy: false
+        contentSecurityPolicy: {
+            directives: {
+                defaultSrc: ["'self'"],
+                scriptSrc: ["'self'", "'unsafe-inline'"],
+                styleSrc: ["'self'", "'unsafe-inline'"],
+                imgSrc: ["'self'", "data:"],
+                connectSrc: ["'self'"],
+                fontSrc: ["'self'"],
+                objectSrc: ["'none'"],
+                mediaSrc: ["'self'"],
+                frameSrc: ["'none'"],
+            },
+        },
+        xssFilter: true,
+        noSniff: true,
+        hsts: {
+            maxAge: 31536000,
+            includeSubDomains: true,
+            preload: true
+        },
+        frameguard: {
+            action: 'deny'
+        },
+        referrerPolicy: { policy: 'same-origin' }
     }));
 
     const limiter = rateLimit({
         windowMs: 15 * 60 * 1000,
-        max: 100,
+        max: 150,
+        standardHeaders: true,
+        legacyHeaders: false,
+        message: 'Too many requests, please try again after 15 minutes',
         skipFailedRequests: true,
+        keyGenerator: (req) => {
+            return req.ip || req.socket.remoteAddress || '127.0.0.1';
+        },
         validate: { trustProxy: false }
     });
     app.use(limiter);
     
     app.set('trust proxy', 1);
     app.use(xss());
-    app.use(express.json({ limit: '100kb' }));
+    app.use(express.json({ 
+        limit: '100kb',
+        verify: (req, res, buf) => {
+            try {
+                JSON.parse(buf);
+            } catch (e) {
+                res.status(400).json({ errors: [{ message: 'Invalid JSON' }] });
+                throw new Error('Invalid JSON');
+            }
+        }
+    }));
+
+    app.use((req, res, next) => {
+        logger.info(`${req.method} ${req.path} - ${req.ip}`);
+        next();
+    });
+    
+    app.use((req, res, next) => {
+        if (req.body && req.body.query && typeof req.body.query === 'string') {
+            try {
+                const query = req.body.query;
+                validateQuery(query);                
+            } catch (error) {
+                logger.error('Query validation error in middleware:', error);
+                return res.status(400).json({
+                    errors: [{ message: error.message || 'Invalid query' }]
+                });
+            }
+        }
+        next();
+    });
 
     app.use('/',
-        cors(),
+        cors({
+            origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : '*',
+            methods: ['POST', 'OPTIONS'],
+            allowedHeaders: ['Content-Type', 'Authorization'],
+            maxAge: 86400
+        }),
         expressMiddleware(server, {
             context: async ({ req }) => ({
                 clientIp: req.ip || '127.0.0.1',
@@ -191,7 +347,7 @@ async function startGateway() {
 
     app.use((err, req, res, next) => {
         logger.error('Express error:', err);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ errors: [{ message: 'Internal server error' }] });
     });
 
     const port = process.env.GATEPORT || 4000;
