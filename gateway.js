@@ -188,13 +188,16 @@ function validateQuery(query) {
 }
 
 async function startGateway() {
+    // Declare server variable at function scope so it's accessible throughout the function
+    let server;
+
     try {
         // Attach unhandled rejection handler to catch any promise errors
         process.on('unhandledRejection', (reason, promise) => {
             logger.error('Unhandled Rejection at:', { reason, promise });
         });
 
-        const server = new ApolloServer({
+        server = new ApolloServer({
             gateway,
             subscriptions: false,
             introspection: process.env.NODE_ENV !== 'production',
