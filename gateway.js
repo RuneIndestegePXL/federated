@@ -11,6 +11,8 @@ const { parse, validate, specifiedRules } = require('graphql');
 const {expressMiddleware} = require("@apollo/server/express4");
 const express = require('express');
 const cors = require('cors');
+const { expressjwt: jwt } = require('express-jwt');
+const jwksRsa = require('jwks-rsa');
 require('dotenv').config();
 
 const logger = {
@@ -275,6 +277,28 @@ async function startGateway() {
         legacyHeaders: false, 
     });
 
+    const checkJwt = jwt({
+        secret: jwksRsa.expressJwtSecret({
+            cache: true,
+            rateLimit: true,
+            jwksRequestsPerMinute: 5,
+            jwksUri: 'https://dev-uydl5f4wukqfcrrd.us.auth0.com/.well-known/jwks.json'
+        }),
+        algorithms: ['RS256'],
+        credentialsRequired: true,
+        requestProperty: 'auth'
+    });
+
+    const handleJwtError = (err, req, res, next) => {
+        if (err.name === 'UnauthorizedError') {
+            logger.warn(`JWT validation failed: ${err.message}`);
+            return res.status(401).json({
+                errors: [{ message: 'Invalid token or missing authentication' }]
+            });
+        }
+        next(err);
+    };
+
     app.use('/',
         cors({
             origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : '*',
@@ -283,11 +307,14 @@ async function startGateway() {
             maxAge: 86400
         }),
         limiter,
+        checkJwt,
+        handleJwtError,
         expressMiddleware(server, {
             context: async ({ req }) => ({
                 clientIp: req.ip || '127.0.0.1',
                 userAgent: req.headers ? req.headers['user-agent'] : undefined,
-                requestId: require('crypto').randomUUID()
+                requestId: require('crypto').randomUUID(),
+                user: req.auth 
             })
         })
     );
