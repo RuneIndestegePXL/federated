@@ -75,9 +75,18 @@ const gateway = new ApolloGateway({
     __exposeQueryPlanExperimental: true, 
     supergraphSdl: new IntrospectAndCompose({
         subgraphs: [
-            { name: 'order-service', url: "http://order-service.usecase-ace.svc.cluster.local:8080/graphql" },
-            { name: 'crm-proxy', url: "http://crm-proxy.usecase-ace.svc.cluster.local:8083/graphql" },
-            { name: 'product-service', url: "http://prisma.usecase-ace.svc.cluster.local:4001/graphql" }
+            { 
+                name: 'order-service', 
+                url: process.env.ORDER_SERVICE_URL
+            },
+            { 
+                name: 'crm-proxy', 
+                url: process.env.CRM_PROXY_URL
+            },
+            { 
+                name: 'product-service', 
+                url: process.env.PRODUCT_SERVICE_URL
+            }
         ],
         introspectionHeaders: {
             'User-Agent': 'Apollo-Gateway'
@@ -282,7 +291,7 @@ async function startGateway() {
             cache: true,
             rateLimit: true,
             jwksRequestsPerMinute: 5,
-            jwksUri: 'https://dev-uydl5f4wukqfcrrd.us.auth0.com/.well-known/jwks.json'
+            jwksUri: process.env.JWKS_URI
         }),
         algorithms: ['RS256'],
         credentialsRequired: true,
